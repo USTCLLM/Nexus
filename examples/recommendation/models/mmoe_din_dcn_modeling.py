@@ -14,6 +14,7 @@ from Nexus.modules import (
 @dataclass
 class MMoEDINDCNv2ModelArguments(ModelArguments):
     embedding_dim: int
+    combined_embeddings: bool = False
     n_experts: int = 3
     deep_cross_combination: str = "parallel"
     mlp_layers: int = field(default=None, metadata={"nargs": "+"})
@@ -39,7 +40,8 @@ class MMoEDINDCNv2Ranker(BaseRanker):
             stats=self.data_config.stats,
             embedding_dim=self.model_config.embedding_dim,
             concat_embeddings=True,
-            stack_embeddings=False
+            stack_embeddings=False,
+            combine_embeddings=self.model_config.combined_embeddings
         )
         return emb
 

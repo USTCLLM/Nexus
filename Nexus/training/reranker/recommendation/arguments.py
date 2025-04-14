@@ -31,6 +31,7 @@ class ModelArguments(AbsRerankerModelArguments):
     # embedding_dim: int = 10
     data_config: DataAttr4Model = None
     embedding_dim: int = 10
+    combine_embeddings: bool = False
     mlp_layers: int = field(default=None, metadata={"nargs": "+"})
     prediction_layers: int = field(default=None, metadata={"nargs": "+"})
     # num_neg: int = 50

@@ -14,6 +14,7 @@ from Nexus.modules import (
 @dataclass
 class DINModelArguments(ModelArguments):
     embedding_dim: int
+    combined_embeddings: bool = False
     cross_net_layers: int = 5
     din_hidden_size: int = 36
     din_feature_inter_strategy: str = "mlp"
@@ -31,7 +32,8 @@ class DINRanker(BaseRanker):
             stats=self.data_config.stats,
             embedding_dim=self.model_config.embedding_dim,
             concat_embeddings=True,
-            stack_embeddings=False
+            stack_embeddings=False,
+            combine_embeddings=self.model_config.combined_embeddings
         )
         return emb
 

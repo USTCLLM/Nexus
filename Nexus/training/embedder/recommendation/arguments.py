@@ -25,6 +25,7 @@ class ModelArguments(AbsEmbedderModelArguments):
     # embedding_dim: int = 10
     data_config: DataAttr4Model = None
     embedding_dim: int = 10
+    combined_embeddings: bool = False
     mlp_layers: int = field(default=None, metadata={"nargs": "+"})
     num_neg: int = 50
     activation: str = "relu"

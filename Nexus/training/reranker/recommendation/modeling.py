@@ -55,7 +55,8 @@ class BaseRanker(AbsRerankerModel):
             stats=self.data_config.stats,
             embedding_dim=self.model_config.embedding_dim,
             concat_embeddings=False,
-            stack_embeddings=True
+            stack_embeddings=True, 
+            combine_embeddings=self.model_config.combine_embeddings,
         )
         return emb
     

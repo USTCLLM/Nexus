@@ -18,6 +18,7 @@ from Nexus.modules import (
 @dataclass
 class SASRecArguments(ModelArguments):
     embedding_dim: int = 2
+    combined_embeddings: bool = False
     num_neg: int = 50
     n_layers: int = 1
     n_heads: int = 2
@@ -37,7 +38,8 @@ class SASRecRetriever(BaseRetriever):
             features=self.data_config.item_features,
             stats=self.data_config.stats,
             embedding_dim=self.model_config.embedding_dim,
-            concat_embeddings=True
+            concat_embeddings=True, 
+            combine_embeddings=self.model_config.combined_embeddings,
         )
         return item_embedding
     
@@ -46,7 +48,8 @@ class SASRecRetriever(BaseRetriever):
         context_emb = MultiFeatEmbedding(
             features=self.data_config.context_features,
             stats=self.data_config.stats,
-            embedding_dim=self.model_config.embedding_dim
+            embedding_dim=self.model_config.embedding_dim,
+            combine_embeddings=self.model_config.combined_embeddings
         )
         encoder = SASRecEncoder(
             context_embedding=context_emb,

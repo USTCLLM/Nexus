@@ -12,6 +12,7 @@ from Nexus.modules import AverageAggregator, LambdaModule, MLPModule, HStackModu
 @dataclass
 class DCNv2ModelArguments(ModelArguments):
     embedding_dim: int
+    combined_embeddings: bool = False
     cross_net_layers: int = 5
     deep_cross_combination: str = "parallel"
     mlp_layers: int = field(default=None, metadata={"nargs": "+"})

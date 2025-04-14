@@ -1,5 +1,6 @@
 {
     "embedding_dim": 2,
+    "combine_embeddings": true, 
     "cross_net_layers": 5, 
     "deep_cross_combination": "parallel",
     "mlp_layers": [1024, 1024],

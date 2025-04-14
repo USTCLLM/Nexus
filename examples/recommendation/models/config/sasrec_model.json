@@ -1,5 +1,6 @@
 {
     "embedding_dim": 2,
+    "combine_embeddings": true, 
     "num_neg": 50,
     "n_layers": 1,
     "n_heads": 2,

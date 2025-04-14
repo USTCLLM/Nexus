@@ -1,5 +1,6 @@
 {
     "embedding_dim": 2,
+    "combine_embeddings": true, 
     "din_hidden_size": 36,
     "din_feature_inter_strategy": "mlp",
     "mlp_layers": [128, 128],

@@ -14,6 +14,7 @@ from Nexus.modules import (
 @dataclass
 class MMoEModelArguments(ModelArguments):
     embedding_dim: int
+    combined_embeddings: bool = False
     n_experts: int = 3
     deep_cross_combination: str = "parallel"
     mlp_layers: int = field(default=None, metadata={"nargs": "+"})

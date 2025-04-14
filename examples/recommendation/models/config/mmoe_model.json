@@ -1,5 +1,6 @@
 {
     "embedding_dim": 2,
+    "combine_embeddings": true, 
     "n_experts": 3,
     "mlp_layers": [128, 128],
     "gate_layers": [32],

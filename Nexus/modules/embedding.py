@@ -6,7 +6,8 @@ __all__ = [
 ]
 
 class MultiFeatEmbedding(torch.nn.Module):
-    def __init__(self, features, stats, embedding_dim, concat_embeddings=True, stack_embeddings=False, *args, **kwargs):
+    def __init__(self, features, stats, embedding_dim, concat_embeddings=True,
+                 stack_embeddings=False, combine_embeddings=False, *args, **kwargs):
         """ Embedding layer for multiple features.
 
         Args:
@@ -17,6 +18,8 @@ class MultiFeatEmbedding(torch.nn.Module):
                 return them separately in a dict. Defaults to True.
             stack_embeddings (bool): whether to stack all embeddings into one tensor along the last dimension or 
                 return them separately in a dict. Defaults to False.
+            combined_embeddings (bool): whether to combine all embeddings into one table or
+                return them separately in a dict. Defaults to False.
                 
             .. note::
             `concat_embeddings` and `stack_embeddings` are mutually exclusive. And if both are False, the embeddings are returned in a dict.
@@ -26,10 +29,22 @@ class MultiFeatEmbedding(torch.nn.Module):
             f: getattr(stats, f) for f in features
         }
         self.embedding_dim = embedding_dim
-        self.feat2embedding = torch.nn.ModuleDict({
-            feat: torch.nn.Embedding(num_embeddings=n, embedding_dim=embedding_dim, padding_idx=0)
-            for feat, n in self.feat2number.items()
-        })
+        self.combine_embeddings = combine_embeddings
+        if self.combine_embeddings:
+            self.feat2offset = {}
+            cur_offset = 0 
+            for feat, n in self.feat2number.items():
+                self.feat2offset[feat] = cur_offset
+                cur_offset += n 
+            self.combined_table = torch.nn.Embedding(
+                num_embeddings=sum(self.feat2number.values()),
+                embedding_dim=embedding_dim)
+        else:
+            self.feat2embedding = torch.nn.ModuleDict({
+                feat: torch.nn.Embedding(num_embeddings=n, embedding_dim=embedding_dim, padding_idx=0)
+                for feat, n in self.feat2number.items()
+            })
+        
         self.total_embedding_dim = embedding_dim * len(features)
         # concat_embeddings and stack_embeddings are mutually exclusive
         assert not (concat_embeddings and stack_embeddings), "concat_embeddings and stack_embeddings are mutually exclusive"
@@ -48,13 +63,39 @@ class MultiFeatEmbedding(torch.nn.Module):
             or a dictionary with keys being feature names and values being their corresponding embeddings
         """
         outputs = {}
-        if strict:
-            for feat, emb in self.feat2embedding.items():
-                outputs[feat] = emb(batch[feat])
+        if self.combine_embeddings:
+            field2shape = {} 
+            field2batch_offset = {} 
+            flattened_batch = []
+            cur_batch_offset = 0
+            if strict:
+                for feat, _ in self.feat2number.items():
+                    field2shape[feat] = batch[feat].shape
+                    field2batch_offset[feat] = cur_batch_offset
+                    flattened_batch.append(batch[feat].flatten() + self.feat2offset[feat]) 
+                    cur_batch_offset += torch.prod(torch.tensor(batch[feat].shape)).item()
+            else:
+                for feat, value in batch.items():
+                    if feat in self.feat2number:
+                        field2shape[feat] = value.shape
+                        field2batch_offset[feat] = cur_batch_offset
+                        flattened_batch.append(value.flatten() + self.feat2offset[feat]) # [B] or [B * L]
+                        cur_batch_offset += torch.prod(torch.tensor(value.shape)).item()
+            flattened_batch = torch.cat(flattened_batch, dim=0) # [F * B * L] or [F * B]
+            # get embeddings from combined table in a single call
+            flattened_batch_embs = self.combined_table(flattened_batch) # [F * B, embedding_dim] or [F * B * L, embedding_dim]
+            for feat, shape in field2shape.items():
+                batch_offset = field2batch_offset[feat]
+                outputs[feat] = flattened_batch_embs[batch_offset : batch_offset + torch.prod(torch.tensor(shape)).item()]
+                outputs[feat] = outputs[feat].reshape(shape + (self.embedding_dim,)) # [B, L, embedding_dim] or [B, embedding_dim]
         else:
-            for feat, value in batch.items():
-                if feat in self.feat2embedding:
-                    outputs[feat] = self.feat2embedding[feat](value)
+            if strict:
+                for feat, emb in self.feat2embedding.items():
+                    outputs[feat] = emb(batch[feat])
+            else:
+                for feat, value in batch.items():
+                    if feat in self.feat2embedding:
+                        outputs[feat] = self.feat2embedding[feat](value)
 
         if self.concat_embeddings:
             outputs = torch.cat([outputs[f] for f in outputs], dim=-1)  # [*, num_features * embedding_dim]
