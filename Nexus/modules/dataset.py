@@ -7,6 +7,8 @@ import re
 import os 
 import fsspec
 import pandas as pd
+import polars as pl
+from pathlib import Path
 
 
 class BaseClient(object):
@@ -222,5 +224,34 @@ def detect_file_type(path: str) -> str:
         return "pkl"
     else:
         raise ValueError(f"Unsupported file type: {file_extension}")
+    
+
+def smart_read_pl(file_path, **kwargs):
+    file_ext = Path(file_path).suffix.lower()
+    
+    if file_ext == ".parquet":
+        return pl.read_parquet(file_path, **kwargs)
+    elif file_ext == ".csv":
+        return pl.read_csv(file_path, **kwargs)
+    elif file_ext == ".json":
+        return pl.read_json(file_path, **kwargs)
+    elif file_ext == ".ipc" or file_ext == ".arrow":
+        return pl.read_ipc(file_path, **kwargs)
+    else:
+        raise ValueError(f"Unsupported file format: {file_ext}")
+    
+
+def get_pyarrow_format(file_path):
+    ext = Path(file_path).suffix.lower()
+    if ext == ".parquet":
+        return "parquet"
+    elif ext == ".csv":
+        return "csv"
+    elif ext == ".json":
+        return "json"
+    elif ext == ".ipc" or ext == ".arrow":
+        return "ipc"
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
     
     

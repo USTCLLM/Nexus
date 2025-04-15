@@ -1,0 +1,9 @@
+{
+    "embedding_dim": 8,
+    "cross_net_layers": 3, 
+    "deep_cross_combination": "parallel",
+    "mlp_layers": [128, 128, 36],
+    "activation": "relu",
+    "dropout": 0.1,
+    "batch_norm": false
+}

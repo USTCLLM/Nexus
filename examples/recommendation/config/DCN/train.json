@@ -1,0 +1,15 @@
+{
+    "num_train_epochs": 1,
+    "per_device_train_batch_size": 1024,
+    "output_dir": "/share/project/huangxu/saves/recommender_results/dcn_ranker",
+    "checkpoint_steps": 3000,
+    "metrics": ["auc", "logloss"],
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "warmup_steps": 1000,
+    "save_steps": 5000,
+    "logging_steps": 50,
+    "disable_tqdm": true,
+    "dataloader_num_workers": 4,
+    "train_batch_size": 8192
+}

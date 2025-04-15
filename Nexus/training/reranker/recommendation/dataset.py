@@ -1,16 +1,101 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
+import os
+import ctypes
+import random
+import polars as pl
+import pyarrow as pa
+import pyarrow.dataset as ds
+from pyarrow import csv
+import numpy.typing as npt
+from cachetools import LRUCache
 
 import torch
 import numpy as np
 import pandas as pd
 from copy import deepcopy
 from dataclasses import dataclass
-from torch.utils.data import DataLoader, IterableDataset, Dataset
+from torch.utils.data import DataLoader, IterableDataset, Dataset, get_worker_info
+import torch.distributed as dist
 from typing import List, Tuple, Union
 
 from Nexus.abc.training.reranker import AbsRerankerCollator
 from Nexus.training.reranker.recommendation.arguments import DataArguments
-from Nexus.modules.dataset import get_client, process_conditions
+from Nexus.modules.dataset import get_client, process_conditions, smart_read_pl, get_pyarrow_format
+
+def _to_tensor(array: pa.Array):
+    """
+    Convert pyarrow.Array to PyTorch Tensor。
+    :param array: A pyarrow.Array type object
+    :return: PyTorch Tensor
+    """
+    def numpy_to_tensor(array: npt.NDArray) -> torch.Tensor:
+        if not array.flags.writeable:
+            array = np.array(array)
+        return torch.from_numpy(array)
+
+    # check if there is null value
+    if array.null_count > 0:
+        raise ValueError("Array contains null values, which are not supported.")
+
+    if pa.types.is_integer(array.type) or pa.types.is_floating(array.type):
+        return numpy_to_tensor(array.to_numpy(zero_copy_only=False))
+    
+    elif pa.types.is_boolean(array.type):
+        return numpy_to_tensor(array.to_numpy(zero_copy_only=False).astype(np.bool_))
+    
+    elif pa.types.is_list(array.type) or pa.types.is_large_list(array.type):
+        # deal with ListArray
+        if isinstance(array, pa.ChunkedArray):
+            array = array.combine_chunks()
+        assert isinstance(array, pa.ListArray) or isinstance(array, pa.LargeListArray)
+        offsets = array.offsets.to_numpy()
+        num_rows = len(offsets) - 1
+        lengths = offsets[1:] - offsets[:-1]
+
+        if not np.all(lengths == lengths[0]):
+            raise ValueError("Not fixed-length list array.")
+
+        list_size = lengths[0]
+
+
+        values = array.values  # critical to keep reference alive
+        dtype = values.type.to_pandas_dtype()
+        itemsize = np.dtype(dtype).itemsize
+
+        # Use memoryview for safer buffer management
+        start = offsets[0] + values.offset
+        end = offsets[-1] + values.offset
+        buf = values.buffers()[1]  # actual data buffer
+
+        mv = memoryview(buf)[start * itemsize : end * itemsize]
+        np_array = np.frombuffer(mv, dtype=dtype).reshape(num_rows, list_size)
+
+        # start = offsets[0]
+        # end = offsets[-1]
+
+        # # === Key Logic：Original arrays ===
+        # values = array.values
+        # buf = values.buffers()[1]
+        # dtype = values.type.to_pandas_dtype()  # int32/int64/bool
+
+        # # === Use ctypes to construct NumPy array (zero-copy + writable) ===
+        # itemsize = np.dtype(dtype).itemsize
+        # values_offset = values.offset
+        # ptr = int(buf.address + (values_offset + start) * itemsize)
+        # length = int((end - start) * itemsize)
+        # raw = (ctypes.c_char * length).from_address(ptr)
+
+        # np_array = np.frombuffer(raw, dtype=dtype).reshape(num_rows, list_size)
+        # np_array.setflags(write=True)  # allow torch.from_numpy
+
+        # test_np_array = np.stack(array.to_numpy(zero_copy_only=False))
+        # if (test_np_array - np_array).sum() != 0:
+        #     print("Error in converting list array to numpy array")
+        return torch.from_numpy(np_array)
+    
+    else:
+        raise NotImplementedError(f"Unsupported Arrow type: {array.type}")
+
 
 
 class ItemDataset(Dataset):
@@ -256,6 +341,163 @@ class ShardedDataset(IterableDataset):
 
 
 
+class ShardedDatasetPA(IterableDataset):
+    def __init__(self, config: DataArguments, batch_size=8192, shuffle=False, seed=42, seq_cache_max_size=1, **kwargs):
+        super(ShardedDatasetPA, self).__init__()
+        self.seed = seed
+        random.seed(seed)
+        self.config = config
+        self.data_client = get_client(config.type, config.url)
+        
+        self.item_feat_dataset = None
+
+        self.filenames = self.config.files
+        if shuffle:
+            random.shuffle(self.filenames)
+        
+        self._batch_size = batch_size
+        self._shuffle_buffer_batches_num = 5
+        self._shuffle = shuffle
+        self._drop_remainder = True
+
+        self._seq_feat_cache = LRUCache(maxsize=seq_cache_max_size)
+
+        seq_join_keys = list(set([seq_info["key"] for seq_info in self.config.user_sequential_info]))
+        
+        self.selected_cols = self.config.context_features + self.config.item_features + self.config.labels
+        self.selected_cols += seq_join_keys
+        self.selected_cols = list(set(self.selected_cols))
+        
+    def __len__(self):
+        return 10000000000
+    
+    def get_worker_info(self) -> Tuple[int, int]:
+        worker_info = get_worker_info()
+        if worker_info is None:
+            worker_id = 0
+            num_workers = 1
+        else:
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+            
+        return rank * num_workers + worker_id, num_workers * world_size
+    
+
+    def get_feat_file_from_data_file(self, seq_info, data_file: str) -> str:
+        return os.path.join(seq_info["url"], data_file)
+    
+    
+    def _concat_seq_data(self, filename: str, batch_data):
+        if len(self.config.user_sequential_info) <= 0:
+            return batch_data
+        src_file_base_name = os.path.basename(filename)
+        if src_file_base_name not in self._seq_feat_cache:
+            seq_dict = {}
+            for i, seq_info in enumerate(self.config.user_sequential_info):
+                seq_name = seq_info["name"]
+                join_key = seq_info["key"]
+                feat_file = self.get_feat_file_from_data_file(seq_info, src_file_base_name)
+                new_col_names = [f"{seq_name}[nexus-sep]{col}" if col != join_key else col for col in seq_info["use_cols"]]
+                seq_df = smart_read_pl(
+                    file_path=feat_file,
+                    columns=seq_info["use_cols"] + [join_key],
+                ).rename(dict(zip(seq_info["use_cols"], new_col_names)))
+                seq_dict[seq_name] = (join_key, seq_df)
+            self._seq_feat_cache[src_file_base_name] = seq_dict
+        else:
+            seq_dict = self._seq_feat_cache[src_file_base_name]
+
+        # convert batch_data to polars DataFrame  
+        batch_df = pl.from_arrow(batch_data)
+        
+        # concat all sequential features
+        join_keys = list(set([seq[0] for seq in seq_dict.values()]))
+        for seq_name, seq in seq_dict.items():
+            join_key, seq_df = seq
+            batch_df = batch_df.join(
+                seq_df,
+                on=join_key,
+                how="left",
+            )
+        
+        # drop the join keys
+        batch_df = batch_df.drop(join_keys)
+        
+        # convert batch_df to pyarrow Table
+        data = batch_df.to_arrow()
+        return data
+
+    
+    def _build_batch(self, table: pa.Table):
+        batch_data = {}
+        for k, v in zip(table.column_names, table.columns):
+            if "[nexus-sep]" in k:
+                # split the column name
+                seq_name, col_name = k.split("[nexus-sep]")
+                if seq_name not in batch_data:
+                    batch_data[seq_name] = {}
+                t = _to_tensor(v)
+                # assert (t - torch.from_numpy(np.stack(v.to_numpy(zero_copy_only=False)))).sum() == 0, f"Error in converting {k} to tensor"
+                batch_data[seq_name][col_name] = t
+                # if col_name == "author_id":
+                #     if batch_data[seq_name][col_name].max() >= 33474011:
+                #         print("Bug!!!")
+            else:
+                batch_data[k] = _to_tensor(v)
+        return batch_data
+    
+    def __iter__(self):
+        worker_id, num_workers = self.get_worker_info()
+        
+        assert num_workers <= len(self.filenames), f"num_workers {num_workers} > num_files {len(self.filenames)}"
+        cur_worker_filenames = [os.path.join(self.config.url, fname) for fname in self.filenames[worker_id::num_workers]]
+
+        dataset = ds.dataset(
+            cur_worker_filenames,
+            format=get_pyarrow_format(cur_worker_filenames[0]),
+        )
+
+        scanner = dataset.scanner(batch_size=self._batch_size, columns=self.selected_cols).scan_batches()
+
+        shuffle_buffer = []
+        while True:
+            data = None
+            try:
+                data = next(scanner)
+            except StopIteration:
+                data = None if self._drop_remainder else data
+            
+            if data is not None:
+                source_file = data.fragment.path
+
+                data = self._concat_seq_data(source_file, data.record_batch)
+
+                if self._shuffle:
+                    shuffle_buffer.append(data)
+                    if len(shuffle_buffer) < self._shuffle_buffer_batches_num:
+                        continue
+                    else:
+                        idx = random.randrange(len(shuffle_buffer))
+                        data = shuffle_buffer.pop(idx)
+                
+                yield self._build_batch(data)
+
+            if data is None:
+                break
+
+        if len(shuffle_buffer) > 0:
+            random.shuffle(shuffle_buffer)
+            for data in shuffle_buffer:
+                yield self._build_batch(data)
+
+
                     
 @dataclass
 class AbsRecommenderRerankerCollator(AbsRerankerCollator):
@@ -311,3 +553,27 @@ def get_datasets(config: Union[dict, str]):
         # instead of the max item id in the dataset
         attr.num_items = len(train_data.item_feat_dataset)
     return (train_data, test_data), attr
+
+
+
+if __name__ == "__main__":
+    # config_path = "/share/project/huangxu/Nexus/examples/recommendation/config/data/recflow_ranker_local.json"
+    config_path = "/share/project/huangxu/Nexus/examples/recommendation/config/data/recflow_ranker_local_seq.json"
+    config = ConfigProcessor(config_path)
+
+    train_config, eval_config = config.split_config()
+
+    train_data = ShardedDatasetPA(train_config, shuffle=True)
+    test_data = ShardedDatasetPA(eval_config, shuffle=False)
+
+    from torch.utils.data import DataLoader
+    import time
+
+    dataloader = DataLoader(train_data, batch_size=None, num_workers=0, shuffle=False)
+    tic = time.time()
+    for i, data in enumerate(dataloader):
+        if i % 100 == 0:
+            print(i)
+    toc = time.time()
+    print(f"Done, time: {toc - tic} seconds")
+
