@@ -3,7 +3,7 @@ from Nexus.abc.training.reranker import AbsRerankerRunner
 from .arguments import TrainingArguments, ModelArguments, DataArguments, DataAttr4Model
 from .modeling import BaseRanker
 from .trainer import RankerTrainer
-from .dataset import AbsRecommenderRerankerCollator, ConfigProcessor, ShardedDataset
+from .dataset import AbsRecommenderRerankerCollator, ConfigProcessor, ShardedDataset, ShardedDatasetPA
 from Nexus.modules.optimizer import get_lr_scheduler, get_optimizer
 from .callback import StopCallback, LoggerCallback
 from transformers import PrinterCallback
@@ -39,12 +39,14 @@ class RankerRunner(AbsRerankerRunner):
         config_processor = ConfigProcessor(self.data_args)
         train_config, eval_config = config_processor.split_config()
 
-        train_data = ShardedDataset(train_config, shuffle=True)
+        train_data = ShardedDatasetPA(train_config, self.training_args.train_batch_size, shuffle=True)
         attr = train_config.to_attr()
         if train_data.item_feat_dataset is not None:
             # when candidate item dataset is given, the number of items is set to the number of items in the dataset
             # instead of the max item id in the dataset
             attr.num_items = len(train_data.item_feat_dataset)
+        self.training_args.train_batch_size = 1
+        self.training_args.remove_unused_columns = False
         return train_data, attr
     
     def load_model(self) -> BaseRanker:
@@ -75,5 +77,6 @@ class RankerRunner(AbsRerankerRunner):
         return trainer
 
     def load_data_collator(self) -> AbsRecommenderRerankerCollator:
-        collator = AbsRecommenderRerankerCollator()
+        # collator = AbsRecommenderRerankerCollator()
+        collator = lambda x: x[0]
         return collator

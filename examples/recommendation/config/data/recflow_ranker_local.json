@@ -1,0 +1,35 @@
+{
+    "name": "recflow",
+    "type": "file",
+    "url": "/share/project/huangxu/data/recflow/recflow_train_data_parquet",
+    "file_partition": {
+        "type": "date",
+        "format": "%Y-%m-%d"
+    },
+    "item_col": "video_id",
+    "context_features": ["user_id", "device_id", "age", "gender", "province"],
+    "item_features": ["video_id", "author_id", "category_level_two", "upload_type", "category_level_one"],
+    "labels": ["effective_view"],
+    "user_sequential_info": [
+    ],
+    "stats": {
+        "user_id": 42472,
+        "device_id": 42561,
+        "age": 8,
+        "gender": 3,
+        "province": 79,
+        "video_id": 82216301,
+        "author_id": 33474011,
+        "category_level_one": 140,
+        "category_level_two": 784,
+        "upload_type": 40
+    },
+    "train_period": {
+        "start_date": "2024-01-13",
+        "end_date": "2024-02-18"
+    },
+    "test_period": {
+        "start_date": "2024-02-18",
+        "end_date": "2024-02-19"
+    }
+}
