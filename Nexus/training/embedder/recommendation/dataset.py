@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, IterableDataset, Dataset
 
 from Nexus.abc.training.embedder import AbsEmbedderCollator
 from Nexus.training.embedder.recommendation.arguments import DataArguments
+from Nexus.training.reranker.recommendation.dataset import ShardedDatasetPA as ShardedDatasetPA4Reranker
 from Nexus.modules.dataset import get_client, process_conditions
 
 
@@ -266,6 +267,30 @@ class ShardedDataset(IterableDataset):
     
     def get_item_loader(self, batch_size, num_workers=0, shuffle=False):
         return DataLoader(self.item_feat_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
+
+
+
+class ShardedDatasetPA(ShardedDatasetPA4Reranker):
+    def __init__(self, config, batch_size=8192, shuffle=False, seed=42, seq_cache_max_size=1, **kwargs):
+        super().__init__(config, batch_size, shuffle, seed, seq_cache_max_size, **kwargs)
+        self.item_feat_dataset = self._load_item_data()
+
+
+    def _load_item_data(self):
+        if self.config.item_info is None:
+            return None
+        data = self.item_data_client.load_file()
+        if isinstance(data, pd.DataFrame):
+            data.set_index(self.config.item_info["key"], inplace=True, drop=True)
+        elif isinstance(data, dict):
+            data = pd.DataFrame.from_dict(data, orient='index', columns=self.config.item_info["columns"])
+        else:
+            raise ValueError("Item data must be DataFrame or Dict")
+        if self.config.item_info["use_cols"] is not None:
+            data = data[self.config.item_info["use_cols"]]
+
+        return ItemDataset(data)
+
 
                     
                     

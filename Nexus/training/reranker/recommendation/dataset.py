@@ -1,10 +1,12 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
+from concurrent.futures import ThreadPoolExecutor
 import os
 import ctypes
 import random
 import polars as pl
 import pyarrow as pa
 import pyarrow.dataset as ds
+from pyarrow import parquet
 from pyarrow import csv
 import numpy.typing as npt
 from cachetools import LRUCache
@@ -16,7 +18,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from torch.utils.data import DataLoader, IterableDataset, Dataset, get_worker_info
 import torch.distributed as dist
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional, Iterator
+from loguru import logger
 
 from Nexus.abc.training.reranker import AbsRerankerCollator
 from Nexus.training.reranker.recommendation.arguments import DataArguments
@@ -97,6 +100,151 @@ def _to_tensor(array: pa.Array):
         raise NotImplementedError(f"Unsupported Arrow type: {array.type}")
 
 
+def calc_slice_position(
+    row_count: int,
+    slice_id: int,
+    slice_count: int,
+    batch_size: int,
+    drop_redundant_bs_eq_one: bool,
+    pre_total_remain: int = 0,
+) -> Tuple[int, int, int]:
+    """Calc table read position according to the slice information.
+
+    Args:
+        row_count (int): table total row count.
+        slice_id (int): worker id.
+        slice_count (int): total worker number.
+        batch_size (int): batch_size.
+        drop_redundant_bs_eq_one (bool): drop last redundant batch with batch_size
+            equal one to prevent train_eval hung.
+        pre_total_remain (int): remaining total count in pre-table is
+            insufficient to meet the batch_size requirement for each worker.
+
+    Return:
+        start (int): start row position in table.
+        end (int): start row position in table.
+        total_remain (int): remaining total count in curr-table is
+            insufficient to meet the batch_size requirement for each worker.
+    """
+    pre_remain_size = int(pre_total_remain / slice_count)
+    pre_remain_split_point = pre_total_remain % slice_count
+
+    size = int((row_count + pre_total_remain) / slice_count)
+    split_point = (row_count + pre_total_remain) % slice_count
+    if slice_id < split_point:
+        start = slice_id * (size + 1)
+        end = start + (size + 1)
+    else:
+        start = split_point * (size + 1) + (slice_id - split_point) * size
+        end = start + size
+
+    real_start = (
+        start - pre_remain_size * slice_id - min(pre_remain_split_point, slice_id)
+    )
+    real_end = (
+        end
+        - pre_remain_size * (slice_id + 1)
+        - min(pre_remain_split_point, slice_id + 1)
+    )
+    # when (end - start) % bz = 1 on some workers and
+    # (end - start) % bz = 0 on other workers, train_eval will hang
+    if (
+        drop_redundant_bs_eq_one
+        and split_point != 0
+        and (end - start) % batch_size == 1
+        and size % batch_size == 0
+    ):
+        real_end = real_end - 1
+        split_point = 0
+    return real_start, real_end, (size % batch_size) * slice_count + split_point
+
+def _get_metadata(input_file: str) -> Tuple[str, parquet.FileMetaData]:
+    parquet_file = parquet.ParquetFile(input_file)
+    metadata = parquet_file.metadata
+    parquet_file.close()
+    return input_file, metadata
+
+@dataclass
+class TaggedRecordBatch:
+    file_path: str
+    record_batch: pa.RecordBatch
+
+def _parquet_file_iter(
+    input_files: List[str],
+    batch_size: int,
+    columns: Optional[List[str]],
+    worker_id: int,
+    parquet_metas: List[parquet.FileMetaData],
+    start: int,
+    end: int,
+) -> Iterator[pa.RecordBatch]:
+    cnt = 0
+    for input_file in input_files:
+        if cnt >= end:
+            break
+
+        metadata = parquet_metas[input_file]
+        if cnt + metadata.num_rows <= start:
+            cnt += metadata.num_rows
+            continue
+        else:
+            i = 0
+            for i in range(metadata.num_row_groups):
+                row_group_rows = metadata.row_group(i).num_rows
+                if cnt + row_group_rows <= start:
+                    cnt += row_group_rows
+                    continue
+                else:
+                    break
+
+            row_groups = list(range(i, metadata.num_row_groups))
+            parquet_file = parquet.ParquetFile(input_file)
+            for batch in parquet_file.iter_batches(
+                batch_size, row_groups=row_groups, columns=columns, use_threads=False
+            ):
+                if cnt + len(batch) <= start:
+                    logger.debug(
+                        f"worker {worker_id} skip batch. "
+                        f"start: {start}, end: {end}, cnt: {cnt}, len: {len(batch)}."
+                    )
+                elif cnt <= start:
+                    logger.debug(
+                        f"worker {worker_id} yield start batch. "
+                        f"start: {start}, end: {end}, cnt: {cnt}, len: {len(batch)}."
+                    )
+                    tagged_batch = TaggedRecordBatch(input_file, batch[start - cnt :])
+                    yield tagged_batch
+                elif cnt + len(batch) > end:
+                    tagged_batch = TaggedRecordBatch(input_file, batch[: end - cnt])
+                    yield tagged_batch
+                else:
+                    yield TaggedRecordBatch(input_file, batch)
+
+                cnt += len(batch)
+                if cnt >= end:
+                    break
+            parquet_file.close()
+
+
+def _other_file_iter(
+    input_files: List[str],
+    batch_size: int,
+    columns: Optional[List[str]],
+    worker_id: int,
+    num_workers: int,
+) -> Iterator[pa.RecordBatch]:
+    cur_worker_filenames = [fname for fname in input_files[worker_id::num_workers]]
+    dataset = ds.dataset(
+        cur_worker_filenames,
+        format=get_pyarrow_format(cur_worker_filenames[0]),
+    )
+    scanner = dataset.scanner(batch_size=batch_size, columns=columns).scan_batches()
+    for batch in scanner:
+        tagged_batch = TaggedRecordBatch(
+            batch.fragment.path,
+            batch.record_batch,
+        )
+        yield tagged_batch
 
 class ItemDataset(Dataset):
     def __init__(self, item_feat_df: torch.Tensor):
@@ -214,7 +362,7 @@ class ShardedDataIterator(object):
     def load_sequence_files(self, filename: str) -> List[pd.DataFrame]:
         """Load one day of sequence data"""
         if len(self.seq_data_clients) <= 0:
-            return None
+            return []
         date_or_number = self.filename_to_number[filename]
         seq_data_list = []
         for i, seq_data_client in enumerate(self.seq_data_clients):
@@ -351,7 +499,7 @@ class ShardedDatasetPA(IterableDataset):
         
         self.item_feat_dataset = None
 
-        self.filenames = self.config.files
+        self.filenames = [os.path.join(self.config.url, fname) for fname in self.config.files]
         if shuffle:
             random.shuffle(self.filenames)
         
@@ -367,9 +515,50 @@ class ShardedDatasetPA(IterableDataset):
         self.selected_cols = self.config.context_features + self.config.item_features + self.config.labels
         self.selected_cols += seq_join_keys
         self.selected_cols = list(set(self.selected_cols))
+
+        if get_pyarrow_format(self.filenames[0]) == "parquet":
+            self._preprocess_for_parquet()
         
     def __len__(self):
         return 10000000000
+    
+
+    def _preprocess_for_parquet(self):
+        parquet_file = parquet.ParquetFile(self.filenames[0])
+        if self.selected_cols:
+            self._ordered_cols = []
+            for field in parquet_file.schema_arrow:
+                # pyre-ignore [58]
+                if field.name in self.selected_cols:
+                    # self.schema.append(field)
+                    self._ordered_cols.append(field.name)
+        parquet_file.close()
+
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+        # get parquet metadata
+        self._parquet_metas = {}
+        parquet_metas_per_rank = {}
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            for k, v in executor.map(
+                _get_metadata, self.filenames[rank::world_size]
+            ):
+                parquet_metas_per_rank[k] = v
+        if dist.is_initialized():
+            parquet_metas_list = [None] * world_size
+            dist.all_gather_object(parquet_metas_list, parquet_metas_per_rank)
+            for v in parquet_metas_list:
+                self._parquet_metas.update(v)
+        else:
+            self._parquet_metas = parquet_metas_per_rank
+
+        self._num_rows = []
+        for input_file in self.filenames:
+            self._num_rows.append(self._parquet_metas[input_file].num_rows)
+
+    
+
     
     def get_worker_info(self) -> Tuple[int, int]:
         worker_info = get_worker_info()
@@ -444,11 +633,7 @@ class ShardedDatasetPA(IterableDataset):
                 if seq_name not in batch_data:
                     batch_data[seq_name] = {}
                 t = _to_tensor(v)
-                # assert (t - torch.from_numpy(np.stack(v.to_numpy(zero_copy_only=False)))).sum() == 0, f"Error in converting {k} to tensor"
                 batch_data[seq_name][col_name] = t
-                # if col_name == "author_id":
-                #     if batch_data[seq_name][col_name].max() >= 33474011:
-                #         print("Bug!!!")
             else:
                 batch_data[k] = _to_tensor(v)
         return batch_data
@@ -457,25 +642,44 @@ class ShardedDatasetPA(IterableDataset):
         worker_id, num_workers = self.get_worker_info()
         
         assert num_workers <= len(self.filenames), f"num_workers {num_workers} > num_files {len(self.filenames)}"
-        cur_worker_filenames = [os.path.join(self.config.url, fname) for fname in self.filenames[worker_id::num_workers]]
-
-        dataset = ds.dataset(
-            cur_worker_filenames,
-            format=get_pyarrow_format(cur_worker_filenames[0]),
-        )
-
-        scanner = dataset.scanner(batch_size=self._batch_size, columns=self.selected_cols).scan_batches()
+        input_files = self.filenames
+        if get_pyarrow_format(input_files[0]) == "parquet":
+            start, end, _ = calc_slice_position(
+                sum(self._num_rows),
+                worker_id,
+                num_workers,
+                self._batch_size,
+                False,
+            )
+            scanner = _parquet_file_iter(
+                input_files=input_files,
+                batch_size=self._batch_size,
+                columns=self._ordered_cols,
+                worker_id=worker_id,
+                parquet_metas=self._parquet_metas,
+                start=start,
+                end=end,
+            )
+        else:
+            scanner = _other_file_iter(
+                input_files,
+                self._batch_size,
+                self.selected_cols,
+                worker_id,
+                num_workers,
+            )
 
         shuffle_buffer = []
         while True:
             data = None
             try:
-                data = next(scanner)
+                data: TaggedRecordBatch = next(scanner)
             except StopIteration:
                 data = None if self._drop_remainder else data
             
             if data is not None:
-                source_file = data.fragment.path
+                # source_file = data.fragment.path
+                source_file = data.file_path
 
                 data = self._concat_seq_data(source_file, data.record_batch)
 
