@@ -315,7 +315,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         # user and context side features 
         context_features = [sub_feat for feat in self.feature_config['context_features'] 
                             for sub_feat in (list(feat.keys()) if isinstance(feat, dict) else [feat])]
-        user_context_dict = self._row_get_features(
+        user_context_dict = self._row_get_features_new(
             batch_infer_df, 
             context_features, 
             [self.feature_cache_config['features'][feat] for feat in context_features])
