@@ -197,7 +197,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
 
         flattened_candidates_df = pd.DataFrame(flattened_candidates_df)
         # get flattened candidate features
-        flattened_candidates_dict = self._row_get_features(
+        flattened_candidates_dict = self._row_get_features_new(
             flattened_candidates_df, 
             self.feature_config['item_features'], 
             [self.feature_cache_config['features'][feat] for feat in self.feature_config['item_features']])
@@ -298,7 +298,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         # user and context side features 
         context_features = [sub_feat for feat in self.feature_config['context_features'] 
                             for sub_feat in (list(feat.keys()) if isinstance(feat, dict) else [feat])]
-        user_context_dict = self._row_get_features(
+        user_context_dict = self._row_get_features_new(
             batch_infer_df, 
             context_features, 
             [self.feature_cache_config['features'][feat] for feat in context_features])
@@ -393,7 +393,63 @@ class BaseRerankerInferenceEngine(InferenceEngine):
                 res_dict[feat].append(getattr(cur_all_values[cache['key_temp']], cache['field']))
         
         return res_dict
+    
 
+    def _row_get_features_new(self, row_df:pd.DataFrame, feats_list, feats_cache_list):
+        # each row represents one entry 
+        # row_df: [B, M]
+        res_dict = defaultdict(list)
+        feats_key_temp_list = list(set([cache['key_temp'] for cache in feats_cache_list]))
+       
+        with self.redis_client.pipeline() as pipe:
+            feats_all_key_and_temp = set()
+
+            key_temp_vars = {}
+            for key_temp in feats_key_temp_list:
+                key_temp_vars[key_temp] = re.findall('{(.*?)}', key_temp)
+            for row in row_df.itertuples():
+                for key_temp in feats_key_temp_list:
+                    cur_key = key_temp
+                    for key_feat in key_temp_vars[key_temp]:
+                        cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
+                    feats_all_key_and_temp.add((cur_key, key_temp))
+
+            feats_all_key_and_temp = list(feats_all_key_and_temp)
+
+            redis_st_time = time.time_ns()
+
+            # 批量获取Redis值
+            keys_to_get = [key for key, _ in feats_all_key_and_temp]
+            with self.redis_client.pipeline() as pipe:
+                pipe.mget(keys_to_get)
+                feats_all_values = pipe.execute()[0]  # 注意mget返回列表
+
+            redis_ed_time = time.time_ns()
+        logger.info(f'redis get time : {(redis_ed_time - redis_st_time) / 1_000_000_000}s')
+        
+        
+        feats_k2p = {}
+        all_fields = set(cache['field'] for cache in feats_cache_list)
+
+        for (key, key_temp), value in zip(feats_all_key_and_temp, feats_all_values):
+            value_proto = self.key_temp2proto[key_temp]()
+            value_proto.ParseFromString(value)
+            feats_k2p[key] = {field: getattr(value_proto, field, None) for field in all_fields}
+
+        
+        for row in row_df.itertuples():
+            cur_all_values = dict()
+
+            for key_temp in feats_key_temp_list:
+                cur_key = key_temp
+                for key_feat in key_temp_vars[key_temp]:
+                    cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
+                cur_all_values[key_temp] = feats_k2p[cur_key]
+
+            # get features from these protos 
+            for feat, cache in zip(feats_list, feats_cache_list):
+                res_dict[feat].append(cur_all_values[cache['key_temp']][cache['field']])
+        return res_dict
 
     
     def get_ort_session(self) -> ort.InferenceSession:

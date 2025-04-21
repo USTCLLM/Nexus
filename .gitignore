@@ -24,3 +24,4 @@ nexus_test/
 nexus_test*
 
 common_commands
+logs/
