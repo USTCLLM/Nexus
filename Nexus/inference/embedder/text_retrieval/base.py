@@ -591,72 +591,6 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         else:
             raise ValueError(f"Unsupported session type: {session_type}")
 
-    def _inference_tensorrt_old(self, inputs, normalize=True, batch_size=None, *args, **kwargs):
-        # This func is deprecated        
-        if not batch_size:
-            batch_size = self.batch_size
-        
-        if isinstance(inputs, str):
-            inputs=[inputs]
-            
-        tokenizer=self.model.tokenizer        
-        engine=self.session
-        all_outputs=[]
-
-        stream = cuda.Stream()
-        bindings = [0] * engine.num_io_tensors
-        
-        input_memory = []
-        output_buffers = {}
-
-        with engine.create_execution_context() as context:
-            for idx in trange(0, len(inputs), batch_size, desc='Batch Inference'):
-                batch_inputs=inputs[idx: idx+batch_size]
-                
-                encoded_inputs= tokenizer(batch_inputs, return_tensors="np", padding=True, truncation=True, max_length=512)
-                inputs_feed={
-                    'input_ids':encoded_inputs['input_ids'], #(bs, max_length)
-                    'attention_mask':encoded_inputs['attention_mask'],
-                    'token_type_ids':encoded_inputs['token_type_ids']
-                }
-
-
-                for i in range(engine.num_io_tensors):
-                    tensor_name = engine.get_tensor_name(i)
-                    dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
-                    if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                        if -1 in tuple(engine.get_tensor_shape(tensor_name)):  # dynamic
-                            # context.set_input_shape(tensor_name, tuple(engine.get_tensor_profile_shape(tensor_name, 0)[2]))
-                            context.set_input_shape(tensor_name, tuple(inputs_feed[tensor_name].shape))
-                        input_mem = cuda.mem_alloc(inputs_feed[tensor_name].nbytes)
-                        bindings[i] = int(input_mem)
-                        context.set_tensor_address(tensor_name, int(input_mem))
-                        cuda.memcpy_htod_async(input_mem, inputs_feed[tensor_name], stream)
-                        input_memory.append(input_mem)
-                    else:  # output
-                        shape = tuple(context.get_tensor_shape(tensor_name))
-                        output_buffer = np.empty(shape, dtype=dtype)
-                        output_buffer = np.ascontiguousarray(output_buffer)
-                        output_memory = cuda.mem_alloc(output_buffer.nbytes)
-                        bindings[i] = int(output_memory)
-                        context.set_tensor_address(tensor_name, int(output_memory))
-                        output_buffers[tensor_name] = (output_buffer, output_memory)
-
-                context.execute_async_v3(stream_handle=stream.handle)
-                stream.synchronize()
-
-                for tensor_name, (output_buffer, output_memory) in output_buffers.items():
-                    cuda.memcpy_dtoh(output_buffer, output_memory)
-                
-                output=output_buffers['output'][0]
-                cls_output=output[:, 0, :].squeeze()
-                all_outputs.extend(cls_output)
-                
-            if normalize:
-                all_outputs= all_outputs / np.linalg.norm(all_outputs, axis = -1, keepdims = True)
-            
-        return all_outputs
-
     def _inference_tensorrt(self, inputs, normalize=True, batch_size=None, *args, **kwargs):
         if not batch_size:
             batch_size = self.batch_size
@@ -723,8 +657,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 cuda.memcpy_dtoh(output_buffer, output_memory)
 
             output = output_buffers['output'][0]
-            cls_output = output[:, 0, :].squeeze()
+            cls_output = output[:, 0, :]
             all_outputs.extend(cls_output)
+        
+        all_outputs = np.array(all_outputs)
 
         if normalize:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
@@ -755,9 +691,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
             outputs = self.session.run(None, input_feed)
             embeddings = outputs[0] # (1, 9, 768)
             cls_emb=embeddings[:, 0, :]
-            cls_emb=cls_emb.squeeze()
+            # cls_emb=cls_emb
             all_outputs.extend(cls_emb)
-        
+            
+        all_outputs = np.array(all_outputs)
         if normalize == True:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
             return all_outputs
@@ -786,10 +723,11 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
 
             embeddings = outputs.last_hidden_state 
             cls_emb = embeddings[:, 0, :] 
-            cls_emb = cls_emb.squeeze()  
+            # cls_emb = cls_emb.squeeze()
 
             all_outputs.extend(cls_emb.cpu().numpy())  
-
+            
+        all_outputs = np.array(all_outputs)
         if normalize == True:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
             return all_outputs
