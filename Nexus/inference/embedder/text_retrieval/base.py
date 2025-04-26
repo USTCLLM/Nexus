@@ -562,6 +562,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         self,
         inputs: Union[List[str], List[Tuple[str, str]], pd.DataFrame, Any],
         encode_query=False,
+        max_length = None,
         *args,
         **kwargs
     ):
@@ -583,86 +584,26 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         
         session_type=self.config['infer_mode']
         if session_type == 'tensorrt':
-            return self._inference_tensorrt(inputs, *args, **kwargs)
+            return self._inference_tensorrt(inputs=inputs, max_length=max_length, encode_query=encode_query, *args, **kwargs)
         elif session_type == 'onnx':
-            return self._inference_onnx(inputs, *args, **kwargs)
+            return self._inference_onnx(inputs=inputs, max_length=max_length, encode_query=encode_query,*args, **kwargs)
         elif session_type == 'normal':
-            return self._inference_normal(inputs, encode_query=encode_query,*args, **kwargs)
+            return self._inference_normal(inputs=inputs, max_length=max_length, encode_query=encode_query,*args, **kwargs)
         else:
             raise ValueError(f"Unsupported session type: {session_type}")
 
-    def _inference_tensorrt_old(self, inputs, normalize=True, batch_size=None, *args, **kwargs):
-        # This func is deprecated        
-        if not batch_size:
-            batch_size = self.batch_size
-        
-        if isinstance(inputs, str):
-            inputs=[inputs]
-            
-        tokenizer=self.model.tokenizer        
-        engine=self.session
-        all_outputs=[]
-
-        stream = cuda.Stream()
-        bindings = [0] * engine.num_io_tensors
-        
-        input_memory = []
-        output_buffers = {}
-
-        with engine.create_execution_context() as context:
-            for idx in trange(0, len(inputs), batch_size, desc='Batch Inference'):
-                batch_inputs=inputs[idx: idx+batch_size]
-                
-                encoded_inputs= tokenizer(batch_inputs, return_tensors="np", padding=True, truncation=True, max_length=512)
-                inputs_feed={
-                    'input_ids':encoded_inputs['input_ids'], #(bs, max_length)
-                    'attention_mask':encoded_inputs['attention_mask'],
-                    'token_type_ids':encoded_inputs['token_type_ids']
-                }
-
-
-                for i in range(engine.num_io_tensors):
-                    tensor_name = engine.get_tensor_name(i)
-                    dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
-                    if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                        if -1 in tuple(engine.get_tensor_shape(tensor_name)):  # dynamic
-                            # context.set_input_shape(tensor_name, tuple(engine.get_tensor_profile_shape(tensor_name, 0)[2]))
-                            context.set_input_shape(tensor_name, tuple(inputs_feed[tensor_name].shape))
-                        input_mem = cuda.mem_alloc(inputs_feed[tensor_name].nbytes)
-                        bindings[i] = int(input_mem)
-                        context.set_tensor_address(tensor_name, int(input_mem))
-                        cuda.memcpy_htod_async(input_mem, inputs_feed[tensor_name], stream)
-                        input_memory.append(input_mem)
-                    else:  # output
-                        shape = tuple(context.get_tensor_shape(tensor_name))
-                        output_buffer = np.empty(shape, dtype=dtype)
-                        output_buffer = np.ascontiguousarray(output_buffer)
-                        output_memory = cuda.mem_alloc(output_buffer.nbytes)
-                        bindings[i] = int(output_memory)
-                        context.set_tensor_address(tensor_name, int(output_memory))
-                        output_buffers[tensor_name] = (output_buffer, output_memory)
-
-                context.execute_async_v3(stream_handle=stream.handle)
-                stream.synchronize()
-
-                for tensor_name, (output_buffer, output_memory) in output_buffers.items():
-                    cuda.memcpy_dtoh(output_buffer, output_memory)
-                
-                output=output_buffers['output'][0]
-                cls_output=output[:, 0, :].squeeze()
-                all_outputs.extend(cls_output)
-                
-            if normalize:
-                all_outputs= all_outputs / np.linalg.norm(all_outputs, axis = -1, keepdims = True)
-            
-        return all_outputs
-
-    def _inference_tensorrt(self, inputs, normalize=True, batch_size=None, *args, **kwargs):
+    def _inference_tensorrt(self, inputs, max_length=None,normalize=True, encode_query=False,batch_size=None, *args, **kwargs):
         if not batch_size:
             batch_size = self.batch_size
         
         if isinstance(inputs, str):
             inputs = [inputs]
+
+        if not max_length:
+            if encode_query:
+                max_length = self.config['query_max_length']
+            else:
+                max_length = self.config['passage_max_length']
 
         tokenizer = self.model.tokenizer        
         engine = self.session
@@ -678,7 +619,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         for idx in trange(0, len(inputs), batch_size, desc='Batch Inference'):
             batch_inputs = inputs[idx: idx + batch_size]
             
-            encoded_inputs = tokenizer(batch_inputs, return_tensors="np", padding='max_length', truncation=True, max_length=512)
+            encoded_inputs = tokenizer(batch_inputs, return_tensors="np", padding='max_length', truncation=True, max_length=max_length)
             inputs_feed = {
                 'input_ids': encoded_inputs['input_ids'],  # (bs, max_length)
                 'attention_mask': encoded_inputs['attention_mask'],
@@ -723,8 +664,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 cuda.memcpy_dtoh(output_buffer, output_memory)
 
             output = output_buffers['output'][0]
-            cls_output = output[:, 0, :].squeeze()
+            cls_output = output[:, 0, :]
             all_outputs.extend(cls_output)
+        
+        all_outputs = np.array(all_outputs)
 
         if normalize:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
@@ -733,18 +676,24 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
 
 
 
-    def _inference_onnx(self, inputs, normalize = True, batch_size = None, *args, **kwargs):
+    def _inference_onnx(self, inputs=None, max_length=None, normalize = True, encode_query=False, batch_size = None, *args, **kwargs):
         if not batch_size:
             batch_size = self.batch_size
             
         if isinstance(inputs, str):
             inputs=[inputs]
-            
+
+        if not max_length:
+            if encode_query:
+                max_length = self.config['query_max_length']
+            else:
+                max_length = self.config['passage_max_length']
+
         tokenizer = self.model.tokenizer
         all_outputs=[]
         for i in trange(0, len(inputs), batch_size, desc='Batch Inference'):
             batch_inputs= inputs[i:i+batch_size]
-            encoded_inputs = tokenizer(batch_inputs, return_tensors="np", padding=True,  truncation=True, max_length=512)
+            encoded_inputs = tokenizer(batch_inputs, return_tensors="np", padding=True,  truncation=True, max_length=max_length)
             # input_ids = encoded_inputs['input_ids']
             input_feed={
                 'input_ids':encoded_inputs['input_ids'], #(bs, max_length)
@@ -755,9 +704,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
             outputs = self.session.run(None, input_feed)
             embeddings = outputs[0] # (1, 9, 768)
             cls_emb=embeddings[:, 0, :]
-            cls_emb=cls_emb.squeeze()
+            # cls_emb=cls_emb
             all_outputs.extend(cls_emb)
-        
+            
+        all_outputs = np.array(all_outputs)
         if normalize == True:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
             return all_outputs
@@ -765,12 +715,18 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         return cls_emb
 
 
-    def _inference_normal(self, inputs, normalize=True ,batch_size = None, encode_query = False, *args, **kwargs):
+    def _inference_normal(self, inputs , max_length=None ,normalize=True, batch_size = None, encode_query = False, *args, **kwargs):
         if not batch_size:
             batch_size = self.batch_size
         if not isinstance(inputs, list):
             inputs = [inputs]
         
+        if not max_length:
+            if encode_query:
+                max_length = self.config['query_max_length']
+            else:
+                max_length = self.config['passage_max_length']
+                
         model=self.model.model.to('cuda')
         tokenizer = self.model.tokenizer
         
@@ -778,7 +734,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         for idx in trange(0, len(inputs), batch_size, desc='Batch Inference'):
             batch_inputs = inputs[idx: idx+batch_size]
 
-            encoded_inputs = tokenizer(batch_inputs, return_tensors="pt", padding='max_length', truncation=True, max_length=512)
+            encoded_inputs = tokenizer(batch_inputs, return_tensors="pt", padding='max_length', truncation=True, max_length=max_length)
             encoded_inputs = {key: value.to('cuda') for key, value in encoded_inputs.items()} 
 
             with torch.no_grad():  
@@ -786,10 +742,11 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
 
             embeddings = outputs.last_hidden_state 
             cls_emb = embeddings[:, 0, :] 
-            cls_emb = cls_emb.squeeze()  
+            # cls_emb = cls_emb.squeeze()
 
             all_outputs.extend(cls_emb.cpu().numpy())  
-
+            
+        all_outputs = np.array(all_outputs)
         if normalize == True:
             all_outputs = all_outputs / np.linalg.norm(all_outputs, axis=-1, keepdims=True)
             return all_outputs
