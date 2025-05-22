@@ -1,9 +1,10 @@
 import torch
+import torch.nn as nn
 
 from copy import deepcopy
 
 
-__all__ = ["FactorizationMachine", "CrossNetwork", "MultiExperts"]
+__all__ = ["FactorizationMachine", "CrossNetwork", "MultiExperts","MultiSENet"]
 
 class FactorizationMachine(torch.nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -57,5 +58,15 @@ class MultiExperts(torch.nn.Module):
 
     def extra_repr(self):
         return f"n_experts={self.n_experts}"
-        
-        
+
+class MultiSENet(nn.Module):
+    def __init__(self, n_tasks: int, senet_module: torch.nn.Module) -> None:
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.senets = torch.nn.ModuleList([deepcopy(senet_module) for _ in range(n_tasks)])
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        senet_outputs = []
+        for senet in self.senets:
+            senet_outputs.append(senet(inputs))
+        return torch.cat(senet_outputs, dim=-1)   # [batch_size, n_task*hidden_dim]

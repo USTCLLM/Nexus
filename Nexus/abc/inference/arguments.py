@@ -58,3 +58,15 @@ class AbsInferenceArguments(AbsArguments):
             'help':'normalize embeddings'
         }
     )
+    query_max_length: int=field(
+        default=512,
+        metadata={
+            'help':'Query max length'
+        }
+    )
+    passage_max_length: int=field(
+        default=512,
+        metadata={
+            'help':'Passage max length'
+        }
+    )

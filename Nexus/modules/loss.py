@@ -112,6 +112,21 @@ class SampledSoftmaxLoss(PairwiseLoss):
         notpadnum = torch.logical_not(torch.isinf(new_pos)).float().sum(-1)
         output = torch.nan_to_num(output, posinf=0).sum(-1) / notpadnum
         return torch.mean(output)
+    
+
+class InBatchSoftmaxLoss(PairwiseLoss):
+    def forward(self, pos_score, *args, **kwargs):
+        
+        logits = pos_score / 0.07
+        
+        
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        
+        pos_probs = torch.diagonal(probs, 0)
+        
+        loss = -torch.mean(torch.log(pos_probs))
+        
+        return loss
 
 
 class WeightedBPRLoss(PairwiseLoss):

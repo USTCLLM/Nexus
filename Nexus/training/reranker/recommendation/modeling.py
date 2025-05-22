@@ -394,7 +394,7 @@ class DCNv2Ranker(BaseRanker):
             bias=True,
             batch_norm=self.model_config.batch_norm,
             last_activation=True,
-            last_bn=False
+            last_bn=True
         )
         if self.model_config.deep_cross_combination == "stacked":
             layer = torch.nn.Sequential(cross_net, deep_net)

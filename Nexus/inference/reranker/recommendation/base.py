@@ -81,6 +81,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         with open(config['feature_cache_config_path'], 'r') as f:
             self.feature_cache_config = yaml.safe_load(f)
 
+        
         # load cache protos 
         self.key_temp2proto = {}
         for key_temp, proto_dict in self.feature_cache_config['key_temp2proto'].items():
@@ -112,6 +113,9 @@ class BaseRerankerInferenceEngine(InferenceEngine):
             self.convert_to_onnx()
             # pdb.set_trace()
             self.engine = self.get_trt_session()    
+
+        self.get_features_time = 0
+        self.model_time = 0
             
               
     def batch_inference(self, batch_infer_df:pd.DataFrame, batch_candidates_df:pd.DataFrame):
@@ -123,7 +127,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         Returns:
             batch_outputs: np.ndarray
         '''
-        batch_st_time = time.time()
+        time1 = time.time_ns()
 
         # get user_context features 
         batch_user_context_dict = self.get_user_context_features(batch_infer_df)
@@ -137,9 +141,12 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         
         for key in feed_dict:
             feed_dict[key] = np.array(feed_dict[key])
+
+        time2 = time.time_ns()
             
         if self.config['infer_mode'] == 'normal':
             self.model.to(self.config['infer_device'])
+            # print("batch_user_context_dict:", batch_user_context_dict)
             for key, value in batch_user_context_dict.items():
                 if isinstance(value, dict):
                     batch_user_context_dict[key] = {sub_key: torch.tensor(sub_value).to(self.config['infer_device']) for sub_key, sub_value in value.items()}
@@ -157,6 +164,13 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         elif self.config['infer_mode'] == 'trt':
             batch_outputs_idx = self.infer_with_trt(feed_dict)
         # batch_outputs = batch_outputs_idx
+
+        time3 = time.time_ns()
+        if self.cumsum_flag:
+            self.get_features_time += (time2 - time1) / 1_000_000_000
+            self.model_time += (time3 - time2) / 1_000_000_000
+            print(f'get features time: {(time2 - time1) / 1_000_000_000}s')
+            print(f'model time: {(time3 - time2) / 1_000_000_000}s')
         batch_outputs = []
         print('batch_outputs_idx:')
         print(type(np.array(batch_outputs_idx)), np.array(batch_outputs_idx).shape, np.array(batch_outputs_idx)[-5:], 'max:', max(max(row) for row in batch_outputs_idx))
@@ -166,7 +180,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
             batch_outputs.append(
                 np.array(batch_candidates_df.iloc[row_idx][self.feature_config['fiid']])[output_idx])
         batch_outputs = np.stack(batch_outputs, axis=0)
-        batch_ed_time = time.time()
+        batch_ed_time = time.time_ns()
         # print(f'batch time: {batch_ed_time - batch_st_time}s')
         return batch_outputs
 
@@ -197,6 +211,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
 
         flattened_candidates_df = pd.DataFrame(flattened_candidates_df)
         # get flattened candidate features
+        # flattened_candidates_dict = self._row_get_features(
         flattened_candidates_dict = self._row_get_features_new(
             flattened_candidates_df, 
             self.feature_config['item_features'], 
@@ -223,6 +238,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         model.eval()
         model.forward = model.predict 
         
+        B = self.config['infer_batch_size']
 
         input_names = []
         dynamic_axes = {} 
@@ -231,7 +247,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         context_input = {}
         for feat in self.feature_config['context_features']:
             if isinstance(feat, str):
-                context_input[feat] = torch.randint(self.feature_config['stats'][feat], (5,))
+                context_input[feat] = torch.randint(self.feature_config['stats'][feat], (B,))
                 input_names.append(feat)
                 dynamic_axes[feat] = {0: "batch_size"}
             elif isinstance(feat, dict): # for nested features
@@ -240,9 +256,9 @@ class BaseRerankerInferenceEngine(InferenceEngine):
                     for sub_feat in sub_feat_list:
                         if feat_name in self.feature_config['seq_features']:
                             sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], 
-                                                                         (5, self.feature_config['seq_lengths'][feat_name]))
+                                                                         (B, self.feature_config['seq_lengths'][feat_name]))
                         else:
-                            sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], (5,))
+                            sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], (B,))
                         input_names.append(feat_name + '_' + sub_feat)
                         dynamic_axes[feat_name + '_' + sub_feat] = {0: "batch_size"}
                     context_input[feat_name] = sub_context_input
@@ -251,7 +267,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         candidates_input = {} 
         for feat in self.feature_config['item_features']:
             if isinstance(feat, str):
-                candidates_input[feat] = torch.randint(self.feature_config['stats'][feat], (5, 16))
+                candidates_input[feat] = torch.randint(self.feature_config['stats'][feat], (B, self.config['num_candidates']))
                 input_names.append('candidates_' + feat)
                 dynamic_axes['candidates_' + feat] = {0: "batch_size", 1: "num_candidates"}
 
@@ -298,12 +314,23 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         # user and context side features 
         context_features = [sub_feat for feat in self.feature_config['context_features'] 
                             for sub_feat in (list(feat.keys()) if isinstance(feat, dict) else [feat])]
+        
+        no_redis_features = []
+        for feat in context_features:
+            if feat not in self.feature_cache_config['features']:
+                no_redis_features.append(feat)
+
+        context_features = [feat for feat in context_features if feat not in no_redis_features]
+
+
+        # user_context_dict = self._row_get_features(
         user_context_dict = self._row_get_features_new(
             batch_infer_df, 
             context_features, 
-            [self.feature_cache_config['features'][feat] for feat in context_features])
-        
-        
+            [self.feature_cache_config['features'][feat] for feat in context_features],
+            no_redis_features)
+
+                
         # expand features with nested keys
         for feat in self.feature_config['context_features']:
             if isinstance(feat, dict):
@@ -342,7 +369,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         
         return user_context_dict
     
-    def _row_get_features(self, row_df:pd.DataFrame, feats_list, feats_cache_list):
+    def _row_get_features(self, row_df:pd.DataFrame, feats_list, feats_cache_list, no_redis_features=None):
         # each row represents one entry 
         # row_df: [B, M]
         res_dict = defaultdict(list)
@@ -388,6 +415,10 @@ class BaseRerankerInferenceEngine(InferenceEngine):
                     cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
                 cur_all_values[key_temp] = feats_k2p[cur_key]
 
+            if no_redis_features is not None:
+                for feat in no_redis_features:
+                    res_dict[feat].append(getattr(row, feat))
+
             # get features from these protos 
             for feat, cache in zip(feats_list, feats_cache_list):
                 res_dict[feat].append(getattr(cur_all_values[cache['key_temp']], cache['field']))
@@ -395,7 +426,7 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         return res_dict
     
 
-    def _row_get_features_new(self, row_df:pd.DataFrame, feats_list, feats_cache_list):
+    def _row_get_features_new(self, row_df:pd.DataFrame, feats_list, feats_cache_list, no_redis_features=None):
         # each row represents one entry 
         # row_df: [B, M]
         res_dict = defaultdict(list)
@@ -445,6 +476,10 @@ class BaseRerankerInferenceEngine(InferenceEngine):
                 for key_feat in key_temp_vars[key_temp]:
                     cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
                 cur_all_values[key_temp] = feats_k2p[cur_key]
+
+            if no_redis_features is not None:
+                for feat in no_redis_features:
+                    res_dict[feat].append(getattr(row, feat))
 
             # get features from these protos 
             for feat, cache in zip(feats_list, feats_cache_list):
@@ -573,9 +608,10 @@ class BaseRerankerInferenceEngine(InferenceEngine):
         return output_buffers['output'][0]
     
     def load_model(self, model_path) -> BaseRanker:
-        retriever = None
-        retriever = BaseRanker.from_pretrained(model_path)
+        ranker = None
+        ranker = BaseRanker.from_pretrained(model_path)
         checkpoint = torch.load(os.path.join(model_path, 'model.pt'), map_location=torch.device('cpu'), weights_only=True)
-        retriever.load_state_dict(checkpoint)
-        retriever.eval()
-        return retriever
+        ranker.load_state_dict(checkpoint)
+        ranker.eval()
+        print("ranker model:",ranker)
+        return ranker

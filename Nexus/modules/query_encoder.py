@@ -112,26 +112,56 @@ class SASRecEncoder(BaseQueryEncoderWithSeq):
     
         
         
+# class MLPQueryEncoder(torch.nn.Module):
+#     def __init__(self, data_config, model_config, item_encoder):
+#         super(MLPQueryEncoder, self).__init__()
+        
+#         context_emb = MultiFeatEmbedding(
+#             features=data_config.context_features,
+#             stats=data_config.stats,
+#             embedding_dim=model_config.embedding_dim
+#         )
+        
+#         base_encoder = BaseQueryEncoderWithSeq(
+#             context_embedding=context_emb,
+#             item_encoder=item_encoder,
+#             max_seq_lengths = data_config.seq_lengths,
+#         )
+        
+#         output_dim = model_config.mlp_layers[-1] + context_emb.total_embedding_dim
+        
+#         mlp = MLPModule(
+#             mlp_layers=[output_dim] + model_config.mlp_layers,
+#             activation_func=model_config.activation,
+#             dropout=model_config.dropout,
+#             bias=True,
+#             batch_norm=model_config.batch_norm,
+#             last_activation=False,
+#             last_bn=False
+#         )
+        
+#         self.encoder_mlp_sequence = torch.nn.Sequential(OrderedDict([
+#             ("encoder", base_encoder),
+#             ("mlp", mlp)
+#         ]))
+
+#     def forward(self, x):
+#         return self.encoder_mlp_sequence(x)
+    
 class MLPQueryEncoder(torch.nn.Module):
-    def __init__(self, data_config, model_config, item_encoder):
+    def __init__(self, data_config, model_config):
         super(MLPQueryEncoder, self).__init__()
         
         context_emb = MultiFeatEmbedding(
             features=data_config.context_features,
             stats=data_config.stats,
-            embedding_dim=model_config.embedding_dim
+            embedding_dim=model_config.embedding_dim,
+            concat_embeddings=True,
+            combine_embeddings = model_config.combined_embeddings,
         )
-        
-        base_encoder = BaseQueryEncoderWithSeq(
-            context_embedding=context_emb,
-            item_encoder=item_encoder,
-            max_seq_lengths = data_config.seq_lengths,
-        )
-        
-        output_dim = model_config.mlp_layers[-1] + context_emb.total_embedding_dim
         
         mlp = MLPModule(
-            mlp_layers=[output_dim] + model_config.mlp_layers,
+            mlp_layers=[context_emb.total_embedding_dim] + model_config.mlp_layers,
             activation_func=model_config.activation,
             dropout=model_config.dropout,
             bias=True,
@@ -140,12 +170,10 @@ class MLPQueryEncoder(torch.nn.Module):
             last_bn=False
         )
         
-        self.encoder_mlp_sequence = torch.nn.Sequential(OrderedDict([
-            ("encoder", base_encoder),
+        self.encoder_mlp = torch.nn.Sequential(OrderedDict([
+            ("context_emb", context_emb),
             ("mlp", mlp)
         ]))
 
     def forward(self, x):
-        return self.encoder_mlp_sequence(x)
-    
-    
+        return self.encoder_mlp(x)

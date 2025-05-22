@@ -13,9 +13,9 @@ from Nexus.training.embedder.recommendation.arguments import DataAttr4Model, Mod
 from Nexus.training.embedder.recommendation.dataset import ItemDataset
 from Nexus.modules.query_encoder import MLPQueryEncoder
 from Nexus.modules.item_encoder import MLPItemEncoder
-from Nexus.modules.sampler import UniformSampler, Sampler
-from Nexus.modules.score import InnerProductScorer
-from Nexus.modules.loss import BPRLoss
+from Nexus.modules.sampler import UniformSampler, Sampler, MIDXUniformSampler
+from Nexus.modules.score import InnerProductScorer, CosineScorer 
+from Nexus.modules.loss import BPRLoss, InBatchSoftmaxLoss
 from Nexus.modules.arguments import get_model_cls
 
 from Nexus.modules import (
@@ -321,6 +321,28 @@ class MLPRetriever(BaseRetriever):
     def encode_info(self, *args, **kwargs):
         return super().encode_info(*args, **kwargs)
 
+class DSSMInBathcRetriever(BaseRetriever):
+    def __init__(self, data_config, model_config, item_loader=None, *args, **kwargs):
+        super().__init__(data_config, model_config, item_loader=item_loader, *args, **kwargs)
+    
+    def get_item_encoder(self):
+        return MLPItemEncoder(self.data_config, self.model_config)
+    
+    def get_query_encoder(self):
+        return MLPQueryEncoder(self.data_config, self.model_config)
+    
+    def get_loss_function(self):
+        return InBatchSoftmaxLoss()
+    
+    def get_negative_sampler(self):
+        return None
+    
+    def get_score_function(self):
+        return CosineScorer()
+
+    def encode_info(self, *args, **kwargs):
+        return super().encode_info(*args, **kwargs)
+
 class DSSMRetriever(BaseRetriever):
     def __init__(self, data_config, model_config, item_loader=None, *args, **kwargs):
         super().__init__(data_config, model_config, item_loader=item_loader, *args, **kwargs)
@@ -329,16 +351,17 @@ class DSSMRetriever(BaseRetriever):
         return MLPItemEncoder(self.data_config, self.model_config)
     
     def get_query_encoder(self):
-        return MLPQueryEncoder(self.data_config, self.model_config, self.item_encoder)
+        return MLPQueryEncoder(self.data_config, self.model_config)
     
     def get_loss_function(self):
         return BPRLoss()
     
     def get_negative_sampler(self):
-        return UniformSampler(num_items=self.data_config.num_items)
+        # return UniformSampler(num_items=self.data_config.num_items)
+        return MIDXUniformSampler(num_items=self.data_config.num_items, num_clusters=200)
     
     def get_score_function(self):
-        return InnerProductScorer()
+        return CosineScorer()
 
     def encode_info(self, *args, **kwargs):
         return super().encode_info(*args, **kwargs)

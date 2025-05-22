@@ -72,6 +72,8 @@ class AbsEmbedderRunner(AbsRunner):
 
         # Training
         self.trainer.train(resume_from_checkpoint=self.training_args.resume_from_checkpoint)
+        print('Training completed.')
         self.trainer.save_model()
+        print('Training completed. save done')
 
 

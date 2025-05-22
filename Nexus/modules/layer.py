@@ -1,14 +1,68 @@
 from typing import Callable
 import torch
+import torch.nn as nn
 
 from . import get_activation
 
 __all__ = [
+    "SENet",
     "MLPModule",
     "ActivationUnit",
     "LambdaModule",
     "HStackModule",
+    "FC"
 ]
+
+class SENet(nn.Module):
+    def __init__(self, input_dim, reduction, use_bn, droprate_rate):
+        super(SENet, self).__init__()
+        self.use_bn = use_bn
+        
+        hidden_dim = input_dim // reduction
+        
+        self.dp1 = nn.Dropout(droprate_rate)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        if self.use_bn:
+            self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.act1 = nn.ReLU()
+        
+        self.dp2 = nn.Dropout(droprate_rate)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+        if self.use_bn:
+            self.bn2 = nn.BatchNorm1d(input_dim)
+        self.act2 = nn.Sigmoid()
+
+    def forward(self, x):
+        out = self.fc1(self.dp1(x))
+        if self.use_bn:
+            out = self.bn1(out)
+        out = self.act1(out)
+
+        out = self.fc2(self.dp2(out))
+        if self.use_bn:
+            out = self.bn2(out)
+        out = self.act2(out)
+
+        return 2 * out * x
+
+class FC(nn.Module):
+    def __init__(self, input_dim, output_dim, use_bn, droprate_rate):
+        super(FC, self).__init__()
+        self.use_bn = use_bn
+        
+        self.dp = nn.Dropout(droprate_rate)
+        self.fc = nn.Linear(input_dim, output_dim)
+        if self.use_bn:
+            self.bn = nn.BatchNorm1d(output_dim)
+        self.act = nn.ReLU()
+    
+    def forward(self, x):
+        out = self.fc(self.dp(x))
+        if self.use_bn:
+            out = self.bn(out)
+        out = self.act(out)
+        
+        return out
 
 class MLPModule(torch.nn.Module):
     def __init__(

@@ -77,6 +77,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 f'{key_temp}_proto_module', proto_dict['module_path'])
             proto_module = importlib.util.module_from_spec(proto_spec)
             proto_spec.loader.exec_module(proto_module)
+
             self.key_temp2proto[key_temp] = getattr(proto_module, proto_dict['class_name'])
 
         # connect to redis for feature cache
@@ -111,6 +112,8 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                             self.retrieve_index_config['item_ids_path'])
             if config['retrieval_mode'] == 'u2i':
                 self.item_index = faiss.read_index(self.retrieve_index_config['item_index_path'])
+                self.res = faiss.StandardGpuResources()  
+                self.item_index = faiss.index_cpu_to_gpu(self.res, 0, self.item_index) 
                 self.item_index.nprobe = self.retrieve_index_config['nprobe']
                 self.item_ids_table = np.load(self.retrieve_index_config['item_ids_path'])
             elif config['retrieval_mode'] == 'i2i':
@@ -125,6 +128,9 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                                     port=self.retrieve_index_config['i2i_redis_port'], 
                                     db=self.retrieve_index_config['i2i_redis_db'],
                                     password=os.getenv('REDIS_PW'))
+        self.get_features_time = 0
+        self.model_time = 0
+        self.faiss_time = 0
                 
     def batch_inference(self, batch_infer_df:DataFrame):
         """
@@ -139,7 +145,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 - If retrieval_mode is 'i2i', returns a list of lists of item IDs representing the recommendations for each sequence of video IDs.
         """
         # iterate infer data 
-        batch_st_time = time.time()
+        time1 = time.time_ns()
 
         # get user_context features 
         batch_user_context_dict = self.get_user_context_features(batch_infer_df)
@@ -149,6 +155,8 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         for key in feed_dict:
             feed_dict[key] = np.array(feed_dict[key])
         
+        time2 = time.time_ns()
+
         if self.config['retrieval_mode'] == 'u2i':
             if self.config['infer_mode'] == 'normal':
                 self.model.to(self.config['infer_device'])
@@ -170,14 +178,25 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
             user_embedding_np = batch_user_embedding[:batch_infer_df.shape[0]]
             # user_embedding_noise = np.random.normal(loc=0.0, scale=0.01, size=user_embedding_np.shape)
             # user_embedding_np = user_embedding_np + user_embedding_noise
+            time3 = time.time_ns()
             D, I = self.item_index.search(user_embedding_np, self.config['output_topk'])
             batch_outputs = I
+
+            time4 = time.time_ns()
         elif self.config['retrieval_mode'] == 'i2i':
             seq_video_ids = feed_dict['seq_video_id']
             batch_outputs = self.get_i2i_recommendations(seq_video_ids)
         
+            time3 = time.time_ns()
+        if self.cumsum_flag:
+            self.get_features_time += (time2 - time1) / 1_000_000_000
+            self.model_time += (time3 - time2) / 1_000_000_000
+            self.faiss_time += (time4 - time3) / 1_000_000_000
+            print(f'get features time: {(time2 - time1) / 1_000_000_000}s')
+            print(f'model time: {(time3 - time2) / 1_000_000_000}s')
+            print(f'faiss time: {(time4 - time3) / 1_000_000_000}s')
+
         # print(batch_outputs.shape)
-        batch_ed_time = time.time()
         # print(f'batch time: {batch_ed_time - batch_st_time}s')
 
         if self.config['retrieval_mode'] == 'u2i':
@@ -257,11 +276,13 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         input_names = []
         dynamic_axes = {} 
 
+        B = self.config['infer_batch_size']
+
         # user/context input
         context_input = {}
         for feat in self.feature_config['context_features']:
             if isinstance(feat, str):
-                context_input[feat] = torch.randint(self.feature_config['stats'][feat], (5,))
+                context_input[feat] = torch.randint(self.feature_config['stats'][feat], (B,))
                 input_names.append(feat)
                 dynamic_axes[feat] = {0: "batch_size"}
             elif isinstance(feat, dict): # for nested features
@@ -270,9 +291,9 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                     for sub_feat in sub_feat_list:
                         if feat_name in self.feature_config['seq_features']:
                             sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], 
-                                                                        (5, self.feature_config['seq_lengths'][feat_name]))
+                                                                        (B, self.feature_config['seq_lengths'][feat_name]))
                         else:
-                            sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], (5,))
+                            sub_context_input[sub_feat] = torch.randint(self.feature_config['stats'][sub_feat], (B,))
                         input_names.append(feat_name + '_' + sub_feat)
                         dynamic_axes[feat_name + '_' + sub_feat] = {0: "batch_size"}
                     context_input[feat_name] = sub_context_input
@@ -315,10 +336,21 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         # user and context side features 
         context_features = [sub_feat for feat in self.feature_config['context_features'] 
                             for sub_feat in (list(feat.keys()) if isinstance(feat, dict) else [feat])]
+        
+        no_redis_features = []
+        for feat in context_features:
+            if feat not in self.feature_cache_config['features']:
+                no_redis_features.append(feat)
+
+        context_features = [feat for feat in context_features if feat not in no_redis_features]
+
+
+        # user_context_dict = self._row_get_features(
         user_context_dict = self._row_get_features_new(
             batch_infer_df, 
             context_features, 
-            [self.feature_cache_config['features'][feat] for feat in context_features])
+            [self.feature_cache_config['features'][feat] for feat in context_features],
+            no_redis_features)
         
         # expand features with nested keys
         for feat in self.feature_config['context_features']:
@@ -356,7 +388,7 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
         
         return user_context_dict
     
-    def _row_get_features(self, row_df:pd.DataFrame, feats_list, feats_cache_list):
+    def _row_get_features(self, row_df:pd.DataFrame, feats_list, feats_cache_list, no_redis_features=None):
         # each row represents one entry 
         # row_df: [B, M]
         res_dict = defaultdict(list)
@@ -402,13 +434,18 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                     cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
                 cur_all_values[key_temp] = feats_k2p[cur_key]
 
+            if no_redis_features is not None:
+                for feat in no_redis_features:
+                    res_dict[feat].append(getattr(row, feat))
+
             # get features from these protos 
             for feat, cache in zip(feats_list, feats_cache_list):
                 res_dict[feat].append(getattr(cur_all_values[cache['key_temp']], cache['field']))
         
         return res_dict
     
-    def _row_get_features_new(self, row_df:pd.DataFrame, feats_list, feats_cache_list):
+
+    def _row_get_features_new(self, row_df:pd.DataFrame, feats_list, feats_cache_list, no_redis_features=None):
         # each row represents one entry 
         # row_df: [B, M]
         res_dict = defaultdict(list)
@@ -421,8 +458,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
             for key_temp in feats_key_temp_list:
                 key_temp_vars[key_temp] = re.findall('{(.*?)}', key_temp)
             for row in row_df.itertuples():
+                # print("row:", row)
                 for key_temp in feats_key_temp_list:
                     cur_key = key_temp
+                    # print("key_temp_vars[key_temp]", key_temp_vars[key_temp])
                     for key_feat in key_temp_vars[key_temp]:
                         cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
                     feats_all_key_and_temp.add((cur_key, key_temp))
@@ -437,7 +476,8 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 pipe.mget(keys_to_get)
                 feats_all_values = pipe.execute()[0]  # 注意mget返回列表
 
-            redis_ed_time = time.time_ns()        
+            redis_ed_time = time.time_ns()
+        
         
         feats_k2p = {}
         all_fields = set(cache['field'] for cache in feats_cache_list)
@@ -456,6 +496,10 @@ class BaseEmbedderInferenceEngine(InferenceEngine):
                 for key_feat in key_temp_vars[key_temp]:
                     cur_key = cur_key.replace(f'{{{key_feat}}}', str(getattr(row, key_feat)))
                 cur_all_values[key_temp] = feats_k2p[cur_key]
+
+            if no_redis_features is not None:
+                for feat in no_redis_features:
+                    res_dict[feat].append(getattr(row, feat))
 
             # get features from these protos 
             for feat, cache in zip(feats_list, feats_cache_list):
