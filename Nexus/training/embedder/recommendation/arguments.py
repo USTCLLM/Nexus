@@ -94,6 +94,8 @@ class DataArguments(AbsEmbedderDataArguments):
     item_info: Optional[Dict[str, Any]] = field(default=None, metadata={"required_keys": ["url", "key", "columns", "use_cols"]})
     seq_features: str = field(default=None, metadata={"nargs": "+"})
 
+    item_pop_dict_path: str = field(default=None)
+
 
     def __post_init__(self):
         # Validate required keys in dictionaries after initialization

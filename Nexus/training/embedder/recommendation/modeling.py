@@ -46,7 +46,7 @@ class BaseRetriever(AbsEmbedderModel):
             self, 
             data_config: DataAttr4Model,
             model_config: Union[Dict, str],
-            item_loader: DataLoader,
+            item_loader: DataLoader=None,
             *args, **kwargs
         ):
         # from BaseModel
@@ -65,6 +65,9 @@ class BaseRetriever(AbsEmbedderModel):
         self.item_vectors = None
         self.item_ids = None
         self.seq_features = data_config.seq_features
+
+    def set_item_loader(self, item_loader: DataLoader=None):
+        self.item_loader = item_loader
 
     def init_modules(self):
         super().init_modules()
@@ -99,7 +102,9 @@ class BaseRetriever(AbsEmbedderModel):
         pos_item_id = batch[self.fiid]
         query_vec = self.query_encoder(batch)
         pos_item_vec = self.item_encoder(batch)
-        pos_score = self.score_function(query_vec, pos_item_vec)
+
+        pos_score, log_pos_prob = None, None
+        neg_item_id, neg_item_vec, log_neg_prob, neg_score = None, None, None, None
 
         if not inference:
             # training mode, sampling negative items or use all items as negative items
@@ -117,18 +122,19 @@ class BaseRetriever(AbsEmbedderModel):
                         pos_items=pos_item_id,
                         user_hist=user_hist,
                     )
+                    pos_score = self.score_function(query_vec, pos_item_vec)
                     neg_item_feat = self.get_item_feat(item_loader.dataset, neg_item_idx)
                     neg_item_id = neg_item_feat.get(self.fiid)
                     neg_item_vec = self.item_encoder(neg_item_feat)
+                    neg_score = self.score_function(query_vec, neg_item_vec)
                     log_pos_prob = self.negative_sampler.compute_item_p(query_vec, pos_item_id) if log_pos_prob is None else log_pos_prob
+            elif isinstance(self.loss_function, InBatchSoftmaxLoss):
+                pos_score = None
             else:
                 raise NotImplementedError("Full softmax is not supported for industrial dataset yet.")
-            neg_score = self.score_function(query_vec, neg_item_vec)
+            
         else:
-            neg_score = None
-            neg_item_id = None
-            neg_item_vec = None
-            log_pos_prob, log_neg_prob = None, None
+            pos_score = self.score_function(query_vec, pos_item_vec)
 
         output = RetrieverModelOutput(
             pos_score=pos_score,
@@ -325,6 +331,10 @@ class DSSMInBathcRetriever(BaseRetriever):
     def __init__(self, data_config, model_config, item_loader=None, *args, **kwargs):
         super().__init__(data_config, model_config, item_loader=item_loader, *args, **kwargs)
     
+    def set_item_loader(self, item_loader = None):
+        super().set_item_loader(item_loader)
+        self.loss_function.post_init(item_loader=item_loader)
+
     def get_item_encoder(self):
         return MLPItemEncoder(self.data_config, self.model_config)
     
@@ -332,7 +342,8 @@ class DSSMInBathcRetriever(BaseRetriever):
         return MLPQueryEncoder(self.data_config, self.model_config)
     
     def get_loss_function(self):
-        return InBatchSoftmaxLoss()
+        num_items = getattr(self.data_config.stats, self.data_config.fiid, self.data_config.num_items)
+        return InBatchSoftmaxLoss(num_items=num_items)
     
     def get_negative_sampler(self):
         return None
@@ -357,8 +368,7 @@ class DSSMRetriever(BaseRetriever):
         return BPRLoss()
     
     def get_negative_sampler(self):
-        # return UniformSampler(num_items=self.data_config.num_items)
-        return MIDXUniformSampler(num_items=self.data_config.num_items, num_clusters=200)
+        return UniformSampler(num_items=self.data_config.num_items)
     
     def get_score_function(self):
         return CosineScorer()

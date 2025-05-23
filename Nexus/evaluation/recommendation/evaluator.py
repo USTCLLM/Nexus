@@ -80,16 +80,17 @@ class RecommenderAbsEvaluator(AbsEvaluator):
         model_type = model.model_type
         model = self.accelerator.prepare(model)
         if model_type == "retriever":
-            item_vector_path = os.path.join(self.model_config.retriever_ckpt_path, 'item_vectors.pt')
-            if os.path.exists(item_vector_path):
-                logger.info(f"Loading item vectors from {item_vector_path} ...")
-                item_vectors_dict = torch.load(item_vector_path)
-                self.item_vectors = item_vectors_dict['item_vectors'].to(self.accelerator.device)
-                self.item_ids = item_vectors_dict['item_ids'].to('cpu')
-            else:
-                logger.info(f"Updating item vectors...")
-                self.item_vectors, self.item_ids = self.update_item_vectors(model)
-                logger.info(f"Updating item vectors done...")
+            if model.model_type == 'retriever':
+                item_vector_path = os.path.join(self.model_config.retriever_ckpt_path, 'item_vectors.pt')
+                if os.path.exists(item_vector_path):
+                    logger.info(f"Loading item vectors from {item_vector_path} ...")
+                    item_vectors_dict = torch.load(item_vector_path)
+                    self.item_vectors = item_vectors_dict['item_vectors'].to(self.accelerator.device)
+                    self.item_ids = item_vectors_dict['item_ids'].to('cpu')
+                else:
+                    logger.info(f"Updating item vectors...")
+                    self.item_vectors, self.item_ids = self.update_item_vectors(model)
+                    logger.info(f"Updating item vectors done...")
         eval_outputs = []
         eval_total_bs = 0
         eval_loader = self.retriever_eval_loader if model_type == "retriever" else self.ranker_eval_loader

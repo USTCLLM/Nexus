@@ -1,0 +1,14 @@
+{
+    "num_train_epochs": 1,
+    "train_batch_size": 1024,
+    "dataloader_num_workers": 4,
+    "output_dir": "./kuairand_pure_inbatch/debug/ckpt/1024_5e-3",
+    "cutoffs": [100],
+    "metrics": ["recall"],
+    "learning_rate": 5e-3,
+    "weight_decay": 0,
+    "save_steps": 80000,
+    "logging_steps": 50,
+    "disable_tqdm": true,
+    "save_strategy": "no"
+}

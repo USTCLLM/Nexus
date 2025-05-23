@@ -1,0 +1,7 @@
+{
+    "retriever_data_path": "./data_test_kuairand_pure_config.json", 
+    "eval_output_dir": "./saves/eval",
+    "cutoffs": [10,50,100,500],
+    "metrics": ["recall"],
+    "eval_batch_size": 8192
+}

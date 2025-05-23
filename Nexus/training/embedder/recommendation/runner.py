@@ -3,7 +3,7 @@ from Nexus.abc.training.embedder import AbsEmbedderRunner
 from .arguments import TrainingArguments, ModelArguments, DataArguments, DataAttr4Model
 from .modeling import BaseRetriever
 from .trainer import RetrieverTrainer
-from .dataset import AbsRecommenderEmbedderCollator, ConfigProcessor, ShardedDataset
+from .dataset import AbsRecommenderEmbedderCollator, ConfigProcessor, ShardedDatasetPA
 from Nexus.modules.optimizer import get_lr_scheduler, get_optimizer
 from .callback import StopCallback, LoggerCallback
 from transformers import PrinterCallback
@@ -35,21 +35,30 @@ class RetrieverRunner(AbsEmbedderRunner):
         self.data_collator = self.load_data_collator()
         self.trainer = trainer if trainer is not None else self.load_trainer()
 
-    def load_dataset(self) -> Tuple[ShardedDataset, DataAttr4Model]:
+    def load_dataset(self) -> Tuple[ShardedDatasetPA, DataAttr4Model]:
         config_processor = ConfigProcessor(self.data_args)
-        train_config, eval_config = config_processor.split_config()
+        train_config, _ = config_processor.split_config()
 
-        train_data = ShardedDataset(train_config, shuffle=True, preload=False)
+        train_data = ShardedDatasetPA(
+            train_config,
+            batch_size = self.training_args.train_batch_size,
+            shuffle = True
+        )
+        
         attr = train_config.to_attr()
+        
+        self.training_args.train_batch_size = 1
+        self.training_args.remove_unused_columns = False
+        
         if train_data.item_feat_dataset is not None:
-            # when candidate item dataset is given, the number of items is set to the number of items in the dataset
-            # instead of the max item id in the dataset
             attr.num_items = len(train_data.item_feat_dataset)
+        
         return train_data, attr
     
     def load_model(self) -> BaseRetriever:
-        item_loader = self.train_dataset.get_item_loader(self.data_args.item_batch_size)
-        model = self.model_class(self.cp_attr, self.model_args, item_loader=item_loader)
+        item_loader = self.train_dataset.get_item_loader(self.data_args.item_batch_size, num_workers=32)
+        model = self.model_class(self.cp_attr, self.model_args)
+        model.set_item_loader(item_loader)
         return model
 
     def load_trainer(self) -> RetrieverTrainer:    
@@ -80,5 +89,5 @@ class RetrieverRunner(AbsEmbedderRunner):
         return trainer
 
     def load_data_collator(self) -> AbsRecommenderEmbedderCollator:
-        collator = AbsRecommenderEmbedderCollator()
+        collator = lambda x: x[0]
         return collator

@@ -40,9 +40,15 @@ class FullScoreLoss(torch.nn.Module):
         """
         pass
 
+    def post_init(self, *args, **kwargs):
+        pass
+
 
 class PairwiseLoss(torch.nn.Module):
     def forward(self, *args, **kwargs):
+        pass
+
+    def post_init(self, *args, **kwargs):
         pass
 
 
@@ -50,6 +56,9 @@ class PointwiseLoss(torch.nn.Module):
     def forward(self, *args, **kwargs):
         raise NotImplementedError(f'{type(self).__name__} is an abstrat class, \
             this method would not be implemented')
+    
+    def post_init(self, *args, **kwargs):
+        pass
 
 
 class SquareLoss(PointwiseLoss):
@@ -115,18 +124,48 @@ class SampledSoftmaxLoss(PairwiseLoss):
     
 
 class InBatchSoftmaxLoss(PairwiseLoss):
-    def forward(self, pos_score, *args, **kwargs):
+    def __init__(self, num_items: int, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+        self.num_items = num_items
+
+        self.IPS = torch.nn.Parameter(torch.ones(num_items), requires_grad=False)
         
-        logits = pos_score / 0.07
-        
+
+    def forward(self, query_vector, pos_item_vector, pos_item_id, *args, **kwargs):
+        score = query_vector @ pos_item_vector.T
+        logits = score / self.temperature
         
         probs = torch.nn.functional.softmax(logits, dim=-1)
         
         pos_probs = torch.diagonal(probs, 0)
-        
-        loss = -torch.mean(torch.log(pos_probs))
+
+        weight = self.IPS[pos_item_id]
+        loss = -torch.mean(torch.log(pos_probs + 1e-8) * weight)
         
         return loss
+
+    def post_init(self, *args, **kwargs):
+        item_loader = kwargs.get('item_loader', None)
+        mode = kwargs.get('mode', 0)
+        if item_loader is not None:
+            item_pop_dict = item_loader.dataset.item_pop_dict
+            item_id = torch.tensor(list(item_pop_dict.keys()), dtype=torch.long)
+            pop_count = torch.tensor(list(item_pop_dict.values()), dtype=torch.float32)
+
+            item2pop = torch.zeros(self.num_items, dtype=torch.float32)
+            item2pop[item_id] = pop_count
+            if mode == 0:
+                item2pop = torch.log(item2pop + 1) + 1e-5
+            elif mode == 1:
+                item2pop = torch.log(item2pop**0.75 + 1) + 1e-5
+            else:
+                raise ValueError("mode should be 0 or 1")
+            item_pop = item2pop / item2pop.sum()
+            self.IPS = torch.nn.Parameter(1.0 / item_pop, requires_grad=False)
+        else:
+            raise ValueError("item_loader should be provided")
+        return super().post_init(*args, **kwargs)
 
 
 class WeightedBPRLoss(PairwiseLoss):

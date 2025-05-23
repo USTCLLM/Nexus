@@ -15,8 +15,37 @@ from Nexus.training.reranker.recommendation.dataset import ShardedDatasetPA as S
 from Nexus.modules.dataset import get_client, process_conditions
 
 
+def _load_popularity_dict(path: str) -> Dict[str, int]:
+    if path.endswith(".json"):
+        import json
+        with open(path, "r") as f:
+            item_pop_dict = json.load(f)
+    elif path.endswith(".pkl"):
+        import pickle
+        with open(path, "rb") as f:
+            item_pop_dict = pickle.load(f)
+    elif path.endswith(".csv"):
+        item_pop_dict = pd.read_csv(path, index_col=0).to_dict()
+    elif path.endswith(".parquet"):
+        item_pop_dict = pd.read_parquet(path, index_col=0).to_dict()
+    elif path.endswith(".feather"):
+        item_pop_dict = pd.read_feather(path, index_col=0).to_dict()
+    else:
+        raise ValueError(f"Unsupported file type: {path}")
+    return item_pop_dict
+
+
 class ItemDataset(Dataset):
-    def __init__(self, item_feat_df: torch.Tensor):
+    def __init__(
+            self,
+            item_feat_df: pd.DataFrame,
+            item_pop_dict_path = None,
+        ):
+        """
+        Args:
+            item_feat_df (pd.DataFrame): DataFrame containing item features
+            item_pop_dict_path (str): Path to the item popularity dictionary
+        """
         super().__init__()
         self.item_feat_df = item_feat_df
         self.item_ids = item_feat_df.index.to_numpy()
@@ -26,6 +55,13 @@ class ItemDataset(Dataset):
             columns=["offset"]
         )
         self.item_id_col = self.item_feat_df.index.name
+
+        if item_pop_dict_path is not None:
+            self.item_pop_dict = _load_popularity_dict(item_pop_dict_path)
+            self.item_pop = np.array([self.item_pop_dict.get(item_id, 0) for item_id in self.item_ids])
+        else:
+            self.item_pop_dict = None
+            self.item_pop = None
 
     def __getitem__(self, index: Union[int, torch.Tensor]):
         if isinstance(index, int):
@@ -279,17 +315,26 @@ class ShardedDatasetPA(ShardedDatasetPA4Reranker):
     def _load_item_data(self):
         if self.config.item_info is None:
             return None
+        
+        self.item_col = self.config.item_info["key"]
+        self.item_data_client = get_client(self.config.type, self.config.item_info["url"])
+        
         data = self.item_data_client.load_file()
+        
         if isinstance(data, pd.DataFrame):
-            data.set_index(self.config.item_info["key"], inplace=True, drop=True)
+            data.set_index(self.item_col , inplace=True, drop=False)
         elif isinstance(data, dict):
             data = pd.DataFrame.from_dict(data, orient='index', columns=self.config.item_info["columns"])
         else:
             raise ValueError("Item data must be DataFrame or Dict")
+        
         if self.config.item_info["use_cols"] is not None:
             data = data[self.config.item_info["use_cols"]]
 
-        return ItemDataset(data)
+        return ItemDataset(data, item_pop_dict_path=self.config.item_pop_dict_path)
+
+    def get_item_loader(self, batch_size, num_workers=0, shuffle=False):
+        return DataLoader(self.item_feat_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
 
 
                     

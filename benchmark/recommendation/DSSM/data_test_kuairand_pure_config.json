@@ -1,0 +1,65 @@
+{
+    "name": "kuairand",
+    "type": "file",
+    "url": "/share/project/liuqi/data/kuairand-pure/kuairand_retriever_test_data_parquet",
+
+    "file_partition": {
+        "type": "date",
+        "format": "%Y-%m-%d"
+    },
+    
+    "train_period": {
+        "start_date": "2022-04-09",
+        "end_date": "2022-05-08"
+    },
+
+    "test_period": {
+        "start_date": "2022-05-08",
+        "end_date": "2022-05-09"
+    },
+
+    "item_col": "video_id",
+    "context_features": ["day_of_week","hour_of_day", "min_of_hour", "user_id", "user_active_degree", "is_video_author", "user_follow_user_num", "follow_user_num_range", "fans_user_num", "fans_user_num_range", "friend_user_num", "friend_user_num_range", "register_days", "register_days_range"],
+    "item_features": ["video_id", "author_id", "video_type", "upload_type", "visible_status", "video_duration", "server_width", "server_height", "music_id", "music_type", "tag", "upload_dt_month", "upload_dt_day"],
+    "labels": ["is_click"],
+
+    "item_info": {
+        "url": "/share/project/liuqi/data/kuairand-pure/kuairand_basic_parquet/video_basic.parquet",
+        "key": "video_id",
+        "columns": ["video_id", "author_id", "video_type", "upload_type", "visible_status", "video_duration", "server_width", "server_height", "music_id", "music_type", "tag", "upload_dt_month", "upload_dt_day"],
+        "use_cols": ["video_id", "author_id", "video_type", "upload_type", "visible_status", "video_duration", "server_width", "server_height", "music_id", "music_type", "tag", "upload_dt_month", "upload_dt_day"]
+    },
+
+    "item_batch_size": 163840,
+    "user_sequential_info": [],
+
+    "stats": {
+        "day_of_week": 7,
+        "hour_of_day": 24,
+        "min_of_hour": 60,
+        "user_id": 27285,
+        "user_active_degree": 9,
+        "is_video_author": 2,
+        "user_follow_user_num": 2562,
+        "follow_user_num_range": 8,
+        "fans_user_num": 2210,
+        "fans_user_num_range": 9,
+        "friend_user_num": 1391,
+        "friend_user_num_range": 7,
+        "register_days": 2813,
+        "register_days_range": 8,
+        "video_id": 7583,
+        "author_id": 6510,
+        "video_type": 3,
+        "upload_type": 14,
+        "visible_status": 1,
+        "video_duration": 194,
+        "server_width": 10,
+        "server_height": 8,
+        "music_id": 7202,
+        "music_type": 5,
+        "tag": 111,
+        "upload_dt_month": 1,
+        "upload_dt_day": 3
+    }
+}
